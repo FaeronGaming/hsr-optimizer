@@ -262,6 +262,124 @@ export type RunSimulationsParams = {
   substatRollsModifier: (num: number, stat: string, relics: { [key: Parts]: Relic }) => number
 }
 
+export async function runSimulationsAsync(
+  form: Form,
+  simulations: Simulation[],
+  inputParams: Partial<RunSimulationsParams> = {},
+): Promise<SimulationResult[]> {
+  const defaultParams: RunSimulationsParams = {
+    quality: 1,
+    speedRollValue: 2.6,
+    mainStatMultiplier: 1,
+    substatRollsModifier: (num: number) => num,
+  }
+  const params: RunSimulationsParams = { ...defaultParams, ...inputParams }
+
+  const sims = simulations.map(async sim => {
+    const request = sim.request
+
+    const head: Relic = emptyRelic()
+    const hands: Relic = emptyRelic()
+    const body: Relic = emptyRelic()
+    const feet: Relic = emptyRelic()
+    const linkRope: Relic = emptyRelic()
+    const planarSphere: Relic = emptyRelic()
+
+    head.augmentedStats.mainStat = Constants.Stats.HP
+    hands.augmentedStats.mainStat = Constants.Stats.ATK
+    body.augmentedStats.mainStat = request.simBody
+    feet.augmentedStats.mainStat = request.simFeet
+    linkRope.augmentedStats.mainStat = request.simLinkRope
+    planarSphere.augmentedStats.mainStat = request.simPlanarSphere
+
+    head.augmentedStats.mainValue = 705.600// * params.mainStatMultiplier
+    hands.augmentedStats.mainValue = 352.800// * params.mainStatMultiplier
+    body.augmentedStats.mainValue = StatCalculator.getMaxedStatValue(request.simBody) * params.mainStatMultiplier
+    feet.augmentedStats.mainValue = StatCalculator.getMaxedStatValue(request.simFeet) * params.mainStatMultiplier
+    linkRope.augmentedStats.mainValue = StatCalculator.getMaxedStatValue(request.simLinkRope) * params.mainStatMultiplier
+    planarSphere.augmentedStats.mainValue = StatCalculator.getMaxedStatValue(request.simPlanarSphere) * params.mainStatMultiplier
+
+    // Generate relic sets
+    // Since the optimizer uses index based relic set identification, it can't handle an empty set
+    // We have to fake rainbow sets by forcing a 2+1+1 or a 1+1+1+1 combination
+    // For planar sets we can't the index be negative or NaN, so we just use two unmatched sets
+    const unusedRelicSets = SetsRelicsNames.filter((x) => x != request.simRelicSet1 && x != request.simRelicSet2)
+
+    head.set = request.simRelicSet1 || unusedRelicSets[0]
+    hands.set = request.simRelicSet1 || unusedRelicSets[1]
+    body.set = request.simRelicSet2 || unusedRelicSets[2]
+    feet.set = request.simRelicSet2 || unusedRelicSets[3]
+    linkRope.set = request.simOrnamentSet || SetsOrnamentsNames[0]
+    planarSphere.set = request.simOrnamentSet || SetsOrnamentsNames[1]
+
+    head.part = Parts.Head
+    hands.part = Parts.Hands
+    body.part = Parts.Body
+    feet.part = Parts.Feet
+    linkRope.part = Parts.LinkRope
+    planarSphere.part = Parts.PlanarSphere
+
+    const relicsByPart = {
+      [Parts.Head]: [head],
+      [Parts.Hands]: [hands],
+      [Parts.Body]: [body],
+      [Parts.Feet]: [feet],
+      [Parts.LinkRope]: [linkRope],
+      [Parts.PlanarSphere]: [planarSphere],
+    }
+    const relics: { [key: string]: Relic } = {
+      [Parts.Head]: head,
+      [Parts.Hands]: hands,
+      [Parts.Body]: body,
+      [Parts.Feet]: feet,
+      [Parts.LinkRope]: linkRope,
+      [Parts.PlanarSphere]: planarSphere,
+    }
+
+    // Convert substat rolls to value totals
+    const substatValues: Stat[] = []
+    const requestSubstats: SimulationStats = Utils.clone(sim.request.stats)
+    if (sim.simType == StatSimTypes.SubstatRolls) {
+      for (const substat of SubStats) {
+        const substatValue = substat == Stats.SPD
+          ? params.speedRollValue
+          : StatCalculator.getMaxedSubstatValue(substat, params.quality)
+
+        let substatCount = Utils.precisionRound((requestSubstats[substat] || 0))
+        substatCount = params.substatRollsModifier(substatCount, substat, relics)
+
+        requestSubstats[substat] = substatCount * substatValue
+      }
+    }
+
+    // Convert value totals to substat objects
+    for (const substat of SubStats) {
+      const value = requestSubstats[substat]
+      if (value) {
+        substatValues.push({
+          stat: substat,
+          value: value,
+        })
+      }
+    }
+
+    head.substats = substatValues
+
+    RelicFilters.condenseRelicSubstatsForOptimizer(relicsByPart)
+
+    const c = calculateBuild(form, relics)
+
+    renameFields(c)
+    // For optimizer grid syncing with sim table
+    c.statSim = {
+      key: sim.key,
+    }
+    return Promise.resolve(c)
+  })
+
+  return Promise.all(sims)
+}
+
 export function runSimulations(
   form: Form,
   simulations: Simulation[],

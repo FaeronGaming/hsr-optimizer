@@ -1,7 +1,7 @@
 import { Character } from 'types/Character'
 import { StatSimTypes } from 'components/optimizerTab/optimizerForm/StatSimulationDisplay'
 import { CUSTOM_TEAM, Parts, Stats, SubStats } from 'lib/constants'
-import { calculateOrnamentSets, calculateRelicSets, convertRelicsToSimulation, runSimulations, Simulation, SimulationRequest, SimulationStats } from 'lib/statSimulationController'
+import { calculateOrnamentSets, calculateRelicSets, convertRelicsToSimulation, runSimulations, runSimulationsAsync, Simulation, SimulationRequest, SimulationStats } from 'lib/statSimulationController'
 import { getDefaultForm } from 'lib/defaultForm'
 import { CharacterConditionals } from 'lib/characterConditionals'
 import { Utils } from 'lib/utils'
@@ -197,28 +197,11 @@ type PartialSimulationWrapper = {
   speedRollsDeduction: number
 }
 
-export function scoreCharacterSimulationPromise(
+export async function scoreCharacterSimulation(
   character: Character,
   displayRelics: RelicBuild,
   teamSelection: string,
 ) {
-  return new Promise(async (resolve, reject) => {
-    const result = scoreCharacterSimulation(character, displayRelics, teamSelection)
-    if (!result) {
-      resolve(null)
-    } else {
-      setTimeout(() => {
-        resolve(result)
-      }, 100)
-    }
-  })
-}
-
-export function scoreCharacterSimulation(
-  character: Character,
-  displayRelics: RelicBuild,
-  teamSelection: string,
-): SimulationScore | null {
   if (!character) {
     return null
   }
@@ -329,13 +312,10 @@ export function scoreCharacterSimulation(
 
   // Generate partials to calculate speed rolls
   const partialSimulationWrappers = generatePartialSimulations(metadata, relicsByPart, originalBaseSpeed)
-  const candidateBenchmarkSims: Simulation[] = []
 
   // Run sims
-  for (const partialSimulationWrapper of partialSimulationWrappers) {
-    const simulationResult = runSimulations(simulationForm, [partialSimulationWrapper.simulation], benchmarkScoringParams)[0]
-
-    // Find the speed deduction
+  const promisedBenchmarks = partialSimulationWrappers.map(async partialSimulationWrapper => {
+    const [ simulationResult ] = await runSimulationsAsync(simulationForm, [partialSimulationWrapper.simulation], benchmarkScoringParams)
     const finalSpeed = simulationResult.xSPD
     partialSimulationWrapper.finalSpeed = finalSpeed
     partialSimulationWrapper.speedRollsDeduction = Math.max(
@@ -349,8 +329,7 @@ export function scoreCharacterSimulation(
 
     // Start the sim search at the max then iterate downwards
     Object.values(SubStats).map((stat) => partialSimulationWrapper.simulation.request.stats[stat] = maxSubstatRollCounts[stat])
-
-    const candidateBenchmarkSim = computeOptimalSimulation(
+    const candidateBenchmarkSim = await computeOptimalSimulationAsync(
       partialSimulationWrapper,
       minSubstatRollCounts,
       maxSubstatRollCounts,
@@ -364,10 +343,12 @@ export function scoreCharacterSimulation(
     // DEBUG
     candidateBenchmarkSim.key = JSON.stringify(candidateBenchmarkSim.request)
     candidateBenchmarkSim.name = ''
-    candidateBenchmarkSims.push(candidateBenchmarkSim)
-  }
+    return candidateBenchmarkSim
+  })
 
   // Try to minimize the penalty modifier before optimizing sim score
+  console.debug('Unwrapping benchmarks', promisedBenchmarks.length)
+  const candidateBenchmarkSims = await Promise.all(promisedBenchmarks)
   candidateBenchmarkSims.sort(simSorter)
   const benchmarkSim = candidateBenchmarkSims[0]
   const benchmarkSimResult = benchmarkSim.result
@@ -376,7 +357,7 @@ export function scoreCharacterSimulation(
 
   // ===== Calculate the maximum build =====
 
-  const maximumSim = simulateMaximumBuild(
+  const maximumSim = await simulateMaximumBuild(
     benchmarkSim,
     metadata,
     simulationForm,
@@ -401,7 +382,7 @@ export function scoreCharacterSimulation(
   // ===== Calculate upgrades =====
 
   const { substatUpgradeResults, setUpgradeResults, mainUpgradeResults }
-    = generateStatImprovements(
+    = await generateStatImprovements(
       originalSimResult,
       originalSim, candidateBenchmarkSims[0],
       simulationForm,
@@ -457,7 +438,7 @@ export function scoreCharacterSimulation(
   return simScoringResult
 }
 
-function simulateMaximumBuild(
+async function simulateMaximumBuild(
   bestSim: Simulation,
   metadata: SimulationMetadata,
   simulationForm: Form,
@@ -466,11 +447,10 @@ function simulateMaximumBuild(
 ) {
   // Convert the benchmark spd rolls to max spd rolls
   const spdRolls = bestSim.request.stats[Stats.SPD] * benchmarkScoringParams.speedRollValue / maximumScoringParams.speedRollValue
-  const maximumSimulations: Simulation[] = []
 
   // Spheres with DMG % are unique because they can alter a build due to DMG % not being a substat.
   // Permute the sphere options to find the best
-  for (const sphereMainStat of metadata.parts[Parts.PlanarSphere]) {
+  const promisedSimulations = metadata.parts[Parts.PlanarSphere].map(async sphereMainStat => {
     const bestSimClone: Simulation = TsUtils.clone(bestSim)
     bestSimClone.request.simPlanarSphere = sphereMainStat
 
@@ -483,7 +463,7 @@ function simulateMaximumBuild(
     const minSubstatRollCounts = calculateMinSubstatRollCounts(partialSimulationWrapper, maximumScoringParams)
     const maxSubstatRollCounts = calculateMaxSubstatRollCounts(partialSimulationWrapper, metadata, maximumScoringParams, baselineSimResult)
     Object.values(SubStats).map((x) => partialSimulationWrapper.simulation.request.stats[x] = maxSubstatRollCounts[x])
-    const maxSim = computeOptimalSimulation(
+    return computeOptimalSimulationAsync(
       partialSimulationWrapper,
       minSubstatRollCounts,
       maxSubstatRollCounts,
@@ -492,11 +472,11 @@ function simulateMaximumBuild(
       metadata,
       maximumScoringParams,
     )
-
-    maximumSimulations.push(maxSim)
-  }
+  })
 
   // Find the highest scoring
+  console.debug('Number of maxSims', promisedSimulations.length)
+  const maximumSimulations: Simulation[] = await Promise.all(promisedSimulations)
   maximumSimulations.sort(simSorter)
 
   return maximumSimulations[0]
@@ -510,7 +490,7 @@ export type SimulationStatUpgrade = {
   percent?: number
 }
 
-function generateStatImprovements(
+async function generateStatImprovements(
   originalSimResult: SimulationResult,
   originalSim: Simulation,
   benchmark: Simulation,
@@ -519,20 +499,20 @@ function generateStatImprovements(
   applyScoringFunction: ScoringFunction,
   scoringParams: ScoringParams,
 ) {
-  const substatUpgradeResults: SimulationStatUpgrade[] = []
-  for (const substatType of metadata.substats) {
+  const simulations = metadata.substats.map(async substatType => {
     const stat: string = substatType
     const originalSimClone: Simulation = TsUtils.clone(originalSim)
     originalSimClone.request.stats[stat] = (originalSimClone.request.stats[stat] ?? 0) + scoringParams.quality
 
     const statImprovementResult = runSimulations(simulationForm, [originalSimClone], { ...scoringParams, substatRollsModifier: (num: number) => num })[0]
     applyScoringFunction(statImprovementResult)
-    substatUpgradeResults.push({
+    return {
       stat: stat,
       simulation: originalSimClone,
       simulationResult: statImprovementResult,
-    })
-  }
+    }
+  })
+  const substatUpgradeResults: SimulationStatUpgrade[] = await Promise.all(simulations)
 
   // Upgrade Set
   const setUpgradeResults: SimulationStatUpgrade[] = []
@@ -618,6 +598,10 @@ function generateFullDefaultForm(
   }
 
   return simulationForm
+}
+
+function computeOptimalSimulationAsync(...args: Parameters<typeof computeOptimalSimulation>) {
+  return Promise.resolve(computeOptimalSimulation(...args))
 }
 
 function computeOptimalSimulation(

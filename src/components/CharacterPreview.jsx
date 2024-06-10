@@ -19,7 +19,7 @@ import EditImageModal from './EditImageModal'
 import { Message } from 'lib/message'
 import CharacterCustomPortrait from './CharacterCustomPortrait'
 import { SaveState } from 'lib/saveState'
-import { getSimScoreGrade, scoreCharacterSimulationPromise } from 'lib/characterScorer'
+import { getSimScoreGrade, scoreCharacterSimulation } from 'lib/characterScorer'
 import { Utils } from 'lib/utils'
 import { CharacterCardScoringStatUpgrades, CharacterScoringSummary } from 'components/characterPreview/CharacterScoringSummary'
 import CharacterModal from 'components/CharacterModal'
@@ -152,7 +152,7 @@ export function CharacterPreview(props) {
 
     (async () => {
       setLoading(true)
-      scoreCharacterSimulationPromise(character, displayRelics, teamSelection).then((combatSimResult) => {
+      scoreCharacterSimulation(character, displayRelics, teamSelection).then((combatSimResult) => {
         let simScoringResult = scoringType == SIMULATION_SCORE && combatSimResult
         if (!simScoringResult?.originalSim) {
           combatSimResult = null
